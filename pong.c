@@ -10,6 +10,16 @@
 #define PADDLE_SPEED 360.0f
 #define BALL_SPEED_X 260.0f
 #define BALL_SPEED_Y 160.0f
+#define BALL_SPEEDUP 1.06f
+#define MAX_BALL_SPEED_X 560.0f
+#define MAX_BALL_SPEED_Y 420.0f
+#define WINNING_SCORE 5
+#define CENTER_LINE_WIDTH 4
+#define CENTER_LINE_HEIGHT 18
+#define CENTER_LINE_GAP 12
+#define DIGIT_WIDTH 30
+#define DIGIT_HEIGHT 54
+#define DIGIT_THICKNESS 6
 
 typedef struct {
 	float x;
@@ -30,6 +40,7 @@ typedef struct {
 	Ball ball;
 	int left_score;
 	int right_score;
+	int game_over;
 } Game;
 
 static float clamp_float(float value, float min, float max) {
@@ -48,7 +59,7 @@ static void reset_ball(Game *game, int direction) {
 	game->ball.x = (WINDOW_WIDTH - BALL_SIZE) / 2.0f;
 	game->ball.y = (WINDOW_HEIGHT - BALL_SIZE) / 2.0f;
 	game->ball.vx = BALL_SPEED_X * (float)direction;
-	game->ball.vy = BALL_SPEED_Y;
+	game->ball.vy = BALL_SPEED_Y * (direction > 0 ? 1.0f : -1.0f);
 }
 
 static void init_game(Game *game) {
@@ -62,6 +73,7 @@ static void init_game(Game *game) {
 
 	game->left_score = 0;
 	game->right_score = 0;
+	game->game_over = 0;
 	reset_ball(game, 1);
 }
 
@@ -77,17 +89,33 @@ static SDL_Rect ball_rect(Ball ball) {
 
 static void update_window_title(SDL_Window *window, const Game *game) {
 	char title[64];
-	SDL_snprintf(title, sizeof(title), "Pong - %d : %d", game->left_score,
-				 game->right_score);
+
+	if (game->game_over) {
+		const char *winner =
+			game->left_score > game->right_score ? "Left" : "Right";
+		SDL_snprintf(title, sizeof(title), "Pong - %s wins - Space to restart",
+					 winner);
+	} else {
+		SDL_snprintf(title, sizeof(title), "Pong - %d : %d", game->left_score,
+					 game->right_score);
+	}
+
 	SDL_SetWindowTitle(window, title);
 }
 
-static void handle_input(Game *game, int *running) {
+static void handle_input(Game *game, int *running, SDL_Window *window) {
 	SDL_Event event;
 
 	while (SDL_PollEvent(&event)) {
 		if (event.type == SDL_QUIT) {
 			*running = 0;
+		}
+
+		if (event.type == SDL_KEYDOWN &&
+			event.key.keysym.scancode == SDL_SCANCODE_SPACE &&
+			game->game_over) {
+			init_game(game);
+			update_window_title(window, game);
 		}
 	}
 
@@ -113,7 +141,43 @@ static void handle_input(Game *game, int *running) {
 	}
 }
 
+static void bounce_from_paddle(Ball *ball, const Paddle *paddle, int direction) {
+	float paddle_center = paddle->y + PADDLE_HEIGHT / 2.0f;
+	float ball_center = ball->y + BALL_SIZE / 2.0f;
+	float hit_position = (ball_center - paddle_center) / (PADDLE_HEIGHT / 2.0f);
+	float speed_x = ball->vx < 0.0f ? -ball->vx : ball->vx;
+
+	hit_position = clamp_float(hit_position, -1.0f, 1.0f);
+	speed_x = clamp_float(speed_x * BALL_SPEEDUP, BALL_SPEED_X, MAX_BALL_SPEED_X);
+
+	ball->vx = speed_x * (float)direction;
+	ball->vy = clamp_float(hit_position * MAX_BALL_SPEED_Y, -MAX_BALL_SPEED_Y,
+						   MAX_BALL_SPEED_Y);
+}
+
+static void award_point(Game *game, int left_player_scored, SDL_Window *window) {
+	if (left_player_scored) {
+		game->left_score++;
+		reset_ball(game, -1);
+	} else {
+		game->right_score++;
+		reset_ball(game, 1);
+	}
+
+	if (game->left_score >= WINNING_SCORE || game->right_score >= WINNING_SCORE) {
+		game->game_over = 1;
+		game->ball.vx = 0.0f;
+		game->ball.vy = 0.0f;
+	}
+
+	update_window_title(window, game);
+}
+
 static void update_game(Game *game, float dt, SDL_Window *window) {
+	if (game->game_over) {
+		return;
+	}
+
 	game->left_paddle.y += game->left_paddle.vy * dt;
 	game->right_paddle.y += game->right_paddle.vy * dt;
 
@@ -141,25 +205,101 @@ static void update_game(Game *game, float dt, SDL_Window *window) {
 
 	if (game->ball.vx < 0.0f && SDL_HasIntersection(&ball, &left_paddle)) {
 		game->ball.x = game->left_paddle.x + PADDLE_WIDTH;
-		game->ball.vx = -game->ball.vx;
+		bounce_from_paddle(&game->ball, &game->left_paddle, 1);
 	}
 
 	if (game->ball.vx > 0.0f && SDL_HasIntersection(&ball, &right_paddle)) {
 		game->ball.x = game->right_paddle.x - BALL_SIZE;
-		game->ball.vx = -game->ball.vx;
+		bounce_from_paddle(&game->ball, &game->right_paddle, -1);
 	}
 
 	if (game->ball.x + BALL_SIZE < 0.0f) {
-		game->right_score++;
-		reset_ball(game, 1);
-		update_window_title(window, game);
+		award_point(game, 0, window);
 	}
 
 	if (game->ball.x > WINDOW_WIDTH) {
-		game->left_score++;
-		reset_ball(game, -1);
-		update_window_title(window, game);
+		award_point(game, 1, window);
 	}
+}
+
+static void fill_rect(SDL_Renderer *renderer, int x, int y, int w, int h) {
+	SDL_Rect rect = {x, y, w, h};
+	SDL_RenderFillRect(renderer, &rect);
+}
+
+static void render_digit(SDL_Renderer *renderer, int digit, int x, int y,
+						 int scale) {
+	static const int segments[10][7] = {
+		{1, 1, 1, 1, 1, 1, 0}, {0, 1, 1, 0, 0, 0, 0},
+		{1, 1, 0, 1, 1, 0, 1}, {1, 1, 1, 1, 0, 0, 1},
+		{0, 1, 1, 0, 0, 1, 1}, {1, 0, 1, 1, 0, 1, 1},
+		{1, 0, 1, 1, 1, 1, 1}, {1, 1, 1, 0, 0, 0, 0},
+		{1, 1, 1, 1, 1, 1, 1}, {1, 1, 1, 1, 0, 1, 1},
+	};
+	int width = DIGIT_WIDTH * scale;
+	int height = DIGIT_HEIGHT * scale;
+	int thickness = DIGIT_THICKNESS * scale;
+
+	if (digit < 0 || digit > 9) {
+		return;
+	}
+
+	if (segments[digit][0]) {
+		fill_rect(renderer, x + thickness, y, width - 2 * thickness, thickness);
+	}
+	if (segments[digit][1]) {
+		fill_rect(renderer, x + width - thickness, y + thickness, thickness,
+				  height / 2 - thickness);
+	}
+	if (segments[digit][2]) {
+		fill_rect(renderer, x + width - thickness, y + height / 2, thickness,
+				  height / 2 - thickness);
+	}
+	if (segments[digit][3]) {
+		fill_rect(renderer, x + thickness, y + height - thickness,
+				  width - 2 * thickness, thickness);
+	}
+	if (segments[digit][4]) {
+		fill_rect(renderer, x, y + height / 2, thickness,
+				  height / 2 - thickness);
+	}
+	if (segments[digit][5]) {
+		fill_rect(renderer, x, y + thickness, thickness,
+				  height / 2 - thickness);
+	}
+	if (segments[digit][6]) {
+		fill_rect(renderer, x + thickness, y + height / 2 - thickness / 2,
+				  width - 2 * thickness, thickness);
+	}
+}
+
+static void render_center_line(SDL_Renderer *renderer) {
+	int x = WINDOW_WIDTH / 2 - CENTER_LINE_WIDTH / 2;
+
+	for (int y = 0; y < WINDOW_HEIGHT;
+		 y += CENTER_LINE_HEIGHT + CENTER_LINE_GAP) {
+		fill_rect(renderer, x, y, CENTER_LINE_WIDTH, CENTER_LINE_HEIGHT);
+	}
+}
+
+static void render_score(SDL_Renderer *renderer, const Game *game) {
+	render_digit(renderer, game->left_score % 10, WINDOW_WIDTH / 2 - 82, 24, 2);
+	render_digit(renderer, game->right_score % 10, WINDOW_WIDTH / 2 + 22, 24, 2);
+}
+
+static void render_game_over(SDL_Renderer *renderer, const Game *game) {
+	int winner_x = game->left_score > game->right_score ? WINDOW_WIDTH / 2 - 78
+														: WINDOW_WIDTH / 2 + 18;
+
+	fill_rect(renderer, winner_x, 92, 72, 6);
+	fill_rect(renderer, winner_x, 92, 6, 34);
+	fill_rect(renderer, winner_x + 66, 92, 6, 34);
+	fill_rect(renderer, winner_x + 14, 112, 44, 6);
+
+	fill_rect(renderer, WINDOW_WIDTH / 2 - 86, WINDOW_HEIGHT - 82, 172, 6);
+	fill_rect(renderer, WINDOW_WIDTH / 2 - 86, WINDOW_HEIGHT - 58, 172, 6);
+	fill_rect(renderer, WINDOW_WIDTH / 2 - 86, WINDOW_HEIGHT - 82, 6, 30);
+	fill_rect(renderer, WINDOW_WIDTH / 2 + 80, WINDOW_HEIGHT - 82, 6, 30);
 }
 
 static void render_game(SDL_Renderer *renderer, const Game *game) {
@@ -167,6 +307,9 @@ static void render_game(SDL_Renderer *renderer, const Game *game) {
 	SDL_RenderClear(renderer);
 
 	SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+	render_center_line(renderer);
+	render_score(renderer, game);
+
 	SDL_Rect left_paddle = paddle_rect(game->left_paddle);
 	SDL_Rect right_paddle = paddle_rect(game->right_paddle);
 	SDL_Rect ball = ball_rect(game->ball);
@@ -174,6 +317,10 @@ static void render_game(SDL_Renderer *renderer, const Game *game) {
 	SDL_RenderFillRect(renderer, &left_paddle);
 	SDL_RenderFillRect(renderer, &right_paddle);
 	SDL_RenderFillRect(renderer, &ball);
+
+	if (game->game_over) {
+		render_game_over(renderer, game);
+	}
 
 	SDL_RenderPresent(renderer);
 }
@@ -215,7 +362,7 @@ int main(void) {
 		float dt = (current_ticks - previous_ticks) / 1000.0f;
 		previous_ticks = current_ticks;
 
-		handle_input(&game, &running);
+		handle_input(&game, &running, pwindow);
 		update_game(&game, dt, pwindow);
 		render_game(prenderer, &game);
 	}
